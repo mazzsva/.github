@@ -1,0 +1,207 @@
+name: Xcode
+
+on:
+  workflow_call:
+    inputs:
+      scheme:
+        description: The scheme to build and test
+        type: string
+        required: true
+      platform:
+        description: iOS to test on the iPhone 18 Pro simulator, or macOS to test on My Mac
+        type: string
+        required: true
+      lint-paths:
+        description: The paths that swift format lints, separated by spaces
+        type: string
+        required: true
+      metal-toolchain:
+        description: Install the Metal Toolchain before the build
+        type: boolean
+        default: false
+      integration-tests:
+        description: Run scripts/test-integration.sh on the Firebase emulators
+        type: boolean
+        default: false
+      example-project:
+        description: The project of an example app to build
+        type: string
+        default: ''
+      example-scheme:
+        description: The scheme of the example app
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Build and Test
+    if: github.event.pull_request.draft != true
+    runs-on: xcode-27
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Report the toolchain
+        run: |
+          xcodebuild -version
+          swift format --version
+
+      - name: Lint the sources
+        env:
+          LINT_PATHS: ${{ inputs.lint-paths }}
+        run: |
+          read -ra paths <<< "$LINT_PATHS"
+          swift format lint --recursive --strict "${paths[@]}"
+
+      - name: Boot the simulator
+        if: inputs.platform == 'iOS'
+        run: |
+          udid=$(xcrun simctl list devices available --json | jq -r '
+            [.devices | to_entries[]
+              | select(.key | test("SimRuntime\\.iOS-[0-9]+(-[0-9]+)*$"))
+              | {version: (.key | split("iOS-")[1] | split("-") | map(tonumber)), device: (.value[] | select(.name == "iPhone 18 Pro"))}]
+            | sort_by(.version) | last | .device.udid')
+          echo "Booting iPhone 18 Pro ($udid)"
+          xcrun simctl boot "$udid"
+          echo "DESTINATION=platform=iOS Simulator,id=$udid" >> "$GITHUB_ENV"
+
+      - name: Choose My Mac
+        if: inputs.platform == 'macOS'
+        run: echo "DESTINATION=platform=macOS" >> "$GITHUB_ENV"
+
+      - name: Install the Metal Toolchain
+        if: inputs.metal-toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Hash the package versions
+        id: packages
+        run: |
+          resolved=$(git ls-files '*Package.resolved')
+          if [ -n "$resolved" ]; then
+            printf '%s\n' "$resolved"
+            echo "hash=$(printf '%s\n' "$resolved" | xargs shasum -a 256 | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Restore the Swift packages
+        id: cache
+        if: steps.packages.outputs.hash != ''
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/SourcePackages
+          key: swiftpm-${{ steps.packages.outputs.hash }}
+          restore-keys: swiftpm-
+
+      - name: Build for testing
+        timeout-minutes: 20
+        env:
+          SCHEME: ${{ inputs.scheme }}
+        run: |
+          xcodebuild build-for-testing \
+            -scheme "$SCHEME" \
+            -destination "$DESTINATION" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            ${{ steps.cache.outputs.cache-hit == 'true' && '-skipPackageUpdates' || '' }} \
+            -skipMacroValidation \
+            -resultBundlePath BuildResults.xcresult
+
+      - name: Build the example app
+        if: inputs.example-project != ''
+        timeout-minutes: 10
+        env:
+          EXAMPLE_PROJECT: ${{ inputs.example-project }}
+          EXAMPLE_SCHEME: ${{ inputs.example-scheme }}
+        run: |
+          xcodebuild build \
+            -project "$EXAMPLE_PROJECT" \
+            -scheme "$EXAMPLE_SCHEME" \
+            -destination "$DESTINATION" \
+            -resultBundlePath ExampleResults.xcresult \
+            CODE_SIGN_IDENTITY=-
+
+      - name: Run the tests
+        timeout-minutes: 10
+        env:
+          SCHEME: ${{ inputs.scheme }}
+        run: |
+          xcodebuild test-without-building \
+            -scheme "$SCHEME" \
+            -destination "$DESTINATION" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -skipPackageUpdates \
+            -parallel-testing-enabled NO \
+            -resultBundlePath TestResults.xcresult
+
+      - name: Install the Firebase emulators
+        if: inputs.integration-tests
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: |
+          brew install openjdk@21
+          npm install --global firebase-tools@15
+
+      - name: Run the integration tests
+        if: inputs.integration-tests
+        timeout-minutes: 10
+        env:
+          XCODEBUILD_ACTION: test-without-building
+        run: |
+          scripts/test-integration.sh \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            -skipPackageUpdates \
+            -parallel-testing-enabled NO \
+            -resultBundlePath IntegrationResults.xcresult
+
+      - name: Check that the integration tests ran
+        if: inputs.integration-tests
+        run: |
+          xcrun xcresulttool get test-results summary --path IntegrationResults.xcresult --compact \
+            | jq -e '.passedTests > 0 and .skippedTests == 0'
+
+      - name: Check for warnings
+        run: |
+          annotations=$(
+            for bundle in BuildResults.xcresult ExampleResults.xcresult; do
+              if [ -d "$bundle" ]; then
+                xcrun xcresulttool get build-results --path "$bundle" --compact
+              fi
+            done | jq -r --arg own "file://$GITHUB_WORKSPACE/" '
+              (.warnings // [])[]
+              | select((.sourceURL // $own) | startswith($own))
+              | (.message | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")) as $message
+              | if .sourceURL then
+                  "::warning file=\(.sourceURL | ltrimstr($own) | sub("#.*$"; ""))::\($message)"
+                else
+                  "::warning::\($message)"
+                end'
+          )
+          if [ -n "$annotations" ]; then
+            printf '%s\n' "$annotations"
+            echo "::error::The build has $(printf '%s\n' "$annotations" | wc -l | tr -d ' ') warnings in the repository's own files"
+            exit 1
+          fi
+          echo "The build has no warnings in the repository's own files"
+
+      - name: Upload the test results
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v7
+        with:
+          name: TestResults
+          path: |
+            BuildResults.xcresult
+            ExampleResults.xcresult
+            TestResults.xcresult
+            IntegrationResults.xcresult
+            firebase-debug.log
+            firestore-debug.log
