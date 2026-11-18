@@ -139,7 +139,7 @@ jobs:
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
             -onlyUsePackageVersionsFromResolvedFile \
             -skipPackageUpdates \
-            -parallel-testing-enabled NO \
+            ${{ inputs.platform == 'iOS' && '-parallel-testing-enabled NO' || '' }} \
             -resultBundlePath TestResults.xcresult
 
       - name: Install the Firebase emulators
@@ -178,13 +178,8 @@ jobs:
               fi
             done | jq -r --arg own "file://$GITHUB_WORKSPACE/" '
               (.warnings // [])[]
-              | select((.sourceURL // $own) | startswith($own))
-              | (.message | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A")) as $message
-              | if .sourceURL then
-                  "::warning file=\(.sourceURL | ltrimstr($own) | sub("#.*$"; ""))::\($message)"
-                else
-                  "::warning::\($message)"
-                end'
+              | select(.sourceURL // "" | startswith($own))
+              | "::warning file=\(.sourceURL | ltrimstr($own) | sub("#.*$"; ""))::\(.message | gsub("%"; "%25") | gsub("\r"; "%0D") | gsub("\n"; "%0A"))"'
           )
           if [ -n "$annotations" ]; then
             printf '%s\n' "$annotations"
