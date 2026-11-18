@@ -29,7 +29,7 @@ jobs:
 
 - **Build once:** The unit tests and the integration tests run on one build.
 - **Warnings:** A warning in the repository's own files fails the run. A warning in a package does not.
-- **Packages:** xcodebuild uses only the versions in `Package.resolved`, from a cache.
+- **Packages:** xcodebuild uses only the versions in `Package.resolved`. A cache keeps them, and the run saves it right after it resolves the packages, so a later failure does not lose it.
 
 ## Pull request template
 

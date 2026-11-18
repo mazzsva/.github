@@ -94,11 +94,30 @@ jobs:
       - name: Restore the Swift packages
         id: cache
         if: steps.packages.outputs.hash != ''
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: ${{ runner.temp }}/SourcePackages
           key: swiftpm-${{ steps.packages.outputs.hash }}
           restore-keys: swiftpm-
+
+      - name: Resolve the Swift packages
+        if: steps.packages.outputs.hash != ''
+        timeout-minutes: 15
+        env:
+          SCHEME: ${{ inputs.scheme }}
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -onlyUsePackageVersionsFromResolvedFile \
+            ${{ steps.cache.outputs.cache-hit == 'true' && '-skipPackageUpdates' || '' }}
+
+      - name: Save the Swift packages
+        if: steps.packages.outputs.hash != '' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/SourcePackages
+          key: swiftpm-${{ steps.packages.outputs.hash }}
 
       - name: Build for testing
         timeout-minutes: 20
@@ -110,7 +129,7 @@ jobs:
             -destination "$DESTINATION" \
             -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
             -onlyUsePackageVersionsFromResolvedFile \
-            ${{ steps.cache.outputs.cache-hit == 'true' && '-skipPackageUpdates' || '' }} \
+            -skipPackageUpdates \
             -skipMacroValidation \
             -resultBundlePath BuildResults.xcresult
 
