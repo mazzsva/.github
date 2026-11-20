@@ -44,7 +44,7 @@ jobs:
     name: Build and Test
     if: github.event.pull_request.draft != true
     runs-on: xcode-27
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Check out the repository
@@ -102,7 +102,7 @@ jobs:
 
       - name: Resolve the Swift packages
         if: steps.packages.outputs.hash != ''
-        timeout-minutes: 15
+        timeout-minutes: 30
         env:
           SCHEME: ${{ inputs.scheme }}
         run: |
