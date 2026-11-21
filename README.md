@@ -38,5 +38,3 @@ GitHub uses `.github/pull_request_template.md` for each repository that has no t
 ## Versions
 
 Each repository pins a version, such as `v1.0.0`. Dependabot opens a pull request in each repository for a new version, so each repository tests the change before it uses it.
-
-Copyright © 2026 Lorenzo Mazzarotto
